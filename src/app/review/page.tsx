@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useMemo, useEffect, useRef } from 'react';
-import cases from '@/lib/cases.json';
+import casesData from '@/lib/cases.json';
 
 interface CaseStudy {
   slug: string;
@@ -19,27 +19,44 @@ interface CaseStudy {
   videoUrl?: string;
 }
 
+// Local storage keys
+const REVIEW_STATE_KEY = 'reviewState';
+const EDITS_KEY = 'caseEdits';
+
 export default function ReviewPage() {
   const [filter, setFilter] = useState<'all' | 'needs_review' | 'flagged' | 'verified'>('needs_review');
   const [currentIndex, setCurrentIndex] = useState(0);
   const [reviewState, setReviewState] = useState<Record<string, string>>({});
+  const [edits, setEdits] = useState<Record<string, Partial<CaseStudy>>>({});
+  const [editingField, setEditingField] = useState<string | null>(null);
   const [videoSpeed, setVideoSpeed] = useState(1.5);
   const videoRef = useRef<HTMLVideoElement>(null);
   
-  // Load review state
+  // Load state from localStorage
   useEffect(() => {
-    const saved = localStorage.getItem('reviewState');
-    if (saved) {
-      try {
-        setReviewState(JSON.parse(saved));
-      } catch (e) {}
+    const savedReview = localStorage.getItem(REVIEW_STATE_KEY);
+    const savedEdits = localStorage.getItem(EDITS_KEY);
+    if (savedReview) {
+      try { setReviewState(JSON.parse(savedReview)); } catch (e) {}
+    }
+    if (savedEdits) {
+      try { setEdits(JSON.parse(savedEdits)); } catch (e) {}
     }
   }, []);
   
   const saveReview = (slug: string, status: string) => {
     const newState = { ...reviewState, [slug]: status };
     setReviewState(newState);
-    localStorage.setItem('reviewState', JSON.stringify(newState));
+    localStorage.setItem(REVIEW_STATE_KEY, JSON.stringify(newState));
+  };
+
+  const saveEdit = (slug: string, field: string, value: string) => {
+    const newEdits = { 
+      ...edits, 
+      [slug]: { ...(edits[slug] || {}), [field]: value } 
+    };
+    setEdits(newEdits);
+    localStorage.setItem(EDITS_KEY, JSON.stringify(newEdits));
   };
 
   const getAwardColor = (award: string) => {
@@ -52,14 +69,20 @@ export default function ReviewPage() {
 
   const getVideoId = (url: string) => {
     if (!url) return null;
-    // YouTube
     const ytMatch = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})/);
     if (ytMatch) return { type: 'youtube', id: ytMatch[1] };
-    // Vimeo
     const vimeoMatch = url.match(/vimeo\.com\/(\d+)/);
     if (vimeoMatch) return { type: 'vimeo', id: vimeoMatch[1] };
     return null;
   };
+
+  // Merge cases with edits
+  const cases = useMemo(() => {
+    return casesData.map((c: CaseStudy) => ({
+      ...c,
+      ...(edits[c.slug] || {})
+    }));
+  }, [edits]);
 
   const filtered = useMemo(() => {
     const withStatus = cases.map((c: CaseStudy) => ({
@@ -67,24 +90,21 @@ export default function ReviewPage() {
       reviewStatus: reviewState[c.slug] as any
     }));
     
-    let filtered = withStatus;
+    let filteredCases = withStatus;
     if (filter === 'needs_review') {
-      filtered = withStatus.filter((c: CaseStudy) => !reviewState[c.slug]);
+      filteredCases = withStatus.filter((c: CaseStudy) => !reviewState[c.slug]);
     } else if (filter === 'flagged') {
-      filtered = withStatus.filter((c: CaseStudy) => reviewState[c.slug] === 'flagged');
+      filteredCases = withStatus.filter((c: CaseStudy) => reviewState[c.slug] === 'flagged');
     } else if (filter === 'verified') {
-      filtered = withStatus.filter((c: CaseStudy) => reviewState[c.slug] === 'verified');
+      filteredCases = withStatus.filter((c: CaseStudy) => reviewState[c.slug] === 'verified');
     }
     
-    // Sort by quality, then by award importance (Gold/GP first)
-    return filtered.sort((a: CaseStudy, b: CaseStudy) => {
-      // First by quality
+    return filteredCases.sort((a: CaseStudy, b: CaseStudy) => {
       if (b.qualityScore !== a.qualityScore) return b.qualityScore - a.qualityScore;
-      // Then by award importance
       const awardOrder = { 'Grand Prix/Titanium': 4, 'Gold': 3, 'Silver': 2, 'Bronze': 1 };
       return (awardOrder[b.award as keyof typeof awardOrder] || 0) - (awardOrder[a.award as keyof typeof awardOrder] || 0);
     });
-  }, [filter, reviewState]);
+  }, [filter, reviewState, cases]);
 
   const current = filtered[currentIndex];
   const videoInfo = current?.videoUrl ? getVideoId(current.videoUrl) : null;
@@ -101,16 +121,49 @@ export default function ReviewPage() {
   const adjustSpeed = (delta: number) => {
     const newSpeed = Math.max(0.5, Math.min(3, videoSpeed + delta));
     setVideoSpeed(newSpeed);
-    if (videoRef.current) {
-      videoRef.current.playbackRate = newSpeed;
-    }
   };
 
   const stats = useMemo(() => {
     const verified = Object.values(reviewState).filter(s => s === 'verified').length;
     const flagged = Object.values(reviewState).filter(s => s === 'flagged').length;
     return { verified, flagged, remaining: cases.length - verified - flagged };
-  }, [reviewState]);
+  }, [reviewState, cases]);
+
+  // Editable field component
+  const EditableField = ({ label, value, field, color, slug }: { label: string, value: string, field: string, color: string, slug: string }) => {
+    const isEditing = editingField === `${slug}-${field}`;
+    const hasEdit = edits[slug]?.[field as keyof CaseStudy];
+    
+    if (!value || value.length < 5) return null;
+    
+    return (
+      <div className="p-4 bg-zinc-900 rounded-xl border border-zinc-800">
+        <div className="flex items-center justify-between mb-2">
+          <h3 className={`text-xs font-bold uppercase tracking-wider ${color}`}>{label}</h3>
+          <button
+            onClick={() => setEditingField(isEditing ? null : `${slug}-${field}`)}
+            className="text-xs text-zinc-500 hover:text-white"
+          >
+            {isEditing ? '✓ Done' : '✏️ Edit'}
+          </button>
+        </div>
+        {isEditing ? (
+          <textarea
+            autoFocus
+            value={value}
+            onChange={(e) => saveEdit(slug, field, e.target.value)}
+            onBlur={() => setEditingField(null)}
+            className="w-full h-32 bg-zinc-800 text-zinc-300 p-3 rounded-lg text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+        ) : (
+          <p className="text-zinc-300 whitespace-pre-wrap">{value}</p>
+        )}
+        {hasEdit && !isEditing && (
+          <p className="text-xs text-yellow-500 mt-2">* Edited</p>
+        )}
+      </div>
+    );
+  };
 
   if (!current) {
     return (
@@ -197,13 +250,11 @@ export default function ReviewPage() {
                 <div className="w-full h-full flex items-center justify-center text-zinc-500">
                   <div className="text-center">
                     <p className="text-4xl mb-2">🎬</p>
-                    <p className="text-sm">No video found</p>
-                    <p className="text-xs text-zinc-600 mt-1">Add source URL to enable</p>
+                    <p className="text-sm">No video</p>
                   </div>
                 </div>
               )}
               
-              {/* Speed control */}
               {videoInfo && (
                 <div className="absolute bottom-2 right-2 flex items-center gap-1 bg-black/80 rounded-lg p-1">
                   <button onClick={() => adjustSpeed(-0.25)} className="w-6 h-6 rounded bg-zinc-700 hover:bg-zinc-600 text-xs">-</button>
@@ -260,35 +311,36 @@ export default function ReviewPage() {
             </div>
           </div>
 
-          {/* Right: Content */}
+          {/* Right: Editable Content */}
           <div className="lg:col-span-2 space-y-4">
-            {current.insight && (
-              <div className="p-4 bg-zinc-900 rounded-xl">
-                <h3 className="text-xs font-bold uppercase text-blue-400 mb-2">💡 Insight</h3>
-                <p className="text-zinc-300">{current.insight}</p>
-              </div>
-            )}
-
-            {current.coreIdea && (
-              <div className="p-4 bg-zinc-900 rounded-xl">
-                <h3 className="text-xs font-bold uppercase text-green-400 mb-2">🎯 Core Idea</h3>
-                <p className="text-zinc-300">{current.coreIdea}</p>
-              </div>
-            )}
-
-            {current.execution && (
-              <div className="p-4 bg-zinc-900 rounded-xl">
-                <h3 className="text-xs font-bold uppercase text-purple-400 mb-2">🎬 Execution</h3>
-                <p className="text-zinc-300">{current.execution}</p>
-              </div>
-            )}
-
-            {current.results && (
-              <div className="p-4 bg-zinc-900 rounded-xl">
-                <h3 className="text-xs font-bold uppercase text-yellow-400 mb-2">📈 Results</h3>
-                <p className="text-zinc-300">{current.results}</p>
-              </div>
-            )}
+            <EditableField 
+              label="💡 Insight" 
+              value={current.insight} 
+              field="insight" 
+              color="text-blue-400"
+              slug={current.slug}
+            />
+            <EditableField 
+              label="🎯 Core Idea" 
+              value={current.coreIdea} 
+              field="coreIdea" 
+              color="text-green-400"
+              slug={current.slug}
+            />
+            <EditableField 
+              label="🎬 Execution" 
+              value={current.execution} 
+              field="execution" 
+              color="text-purple-400"
+              slug={current.slug}
+            />
+            <EditableField 
+              label="📈 Results" 
+              value={current.results} 
+              field="results" 
+              color="text-yellow-400"
+              slug={current.slug}
+            />
 
             {/* Raw data */}
             <details className="p-3 bg-zinc-900 rounded-lg">
@@ -297,7 +349,8 @@ export default function ReviewPage() {
                 {JSON.stringify({ 
                   slug: current.slug,
                   score: current.qualityScore,
-                  videoUrl: current.videoUrl || 'none'
+                  videoUrl: current.videoUrl || 'none',
+                  hasEdits: !!edits[current.slug]
                 }, null, 2)}
               </pre>
             </details>
